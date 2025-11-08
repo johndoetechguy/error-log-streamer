@@ -184,23 +184,25 @@ export const ErrorAnalytics = ({ logs }: ErrorAnalyticsProps) => {
         </ResponsiveContainer>
       </Card>
 
-      {/* AWS Cluster Distribution */}
+      {/* AWS Cluster Trend */}
       <Card className="p-6">
         <h3 className="text-lg font-semibold mb-4">Errors by AWS Cluster</h3>
         <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={clusterData} layout="horizontal">
+          <LineChart data={clusterData}>
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-            <XAxis 
-              type="number"
+            <XAxis
+              dataKey="name"
               stroke="hsl(var(--muted-foreground))"
               tick={{ fill: "hsl(var(--muted-foreground))" }}
+              tickMargin={12}
+              angle={-30}
+              textAnchor="end"
             />
-            <YAxis 
-              dataKey="name" 
-              type="category"
+            <YAxis
               stroke="hsl(var(--muted-foreground))"
-              tick={{ fill: "hsl(var(--muted-foreground))", fontSize: 12 }}
-              width={150}
+              tick={{ fill: "hsl(var(--muted-foreground))" }}
+              allowDecimals={false}
+              width={60}
             />
             <Tooltip 
               contentStyle={{ 
@@ -209,8 +211,14 @@ export const ErrorAnalytics = ({ logs }: ErrorAnalyticsProps) => {
                 borderRadius: "var(--radius)"
               }}
             />
-            <Bar dataKey="value" fill="hsl(var(--accent))" />
-          </BarChart>
+            <Line
+              type="monotone"
+              dataKey="value"
+              stroke="hsl(var(--accent))"
+              strokeWidth={2}
+              dot={{ fill: "hsl(var(--accent))" }}
+            />
+          </LineChart>
         </ResponsiveContainer>
       </Card>
     </div>
