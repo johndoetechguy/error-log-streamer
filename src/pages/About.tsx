@@ -3,7 +3,7 @@ import { Activity, Zap, Shield, Sparkles } from "lucide-react";
 
 const About = () => {
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 w-full">
       <div>
         <h1 className="text-3xl font-bold">About</h1>
         <p className="text-muted-foreground">

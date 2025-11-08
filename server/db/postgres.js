@@ -120,3 +120,93 @@ export async function closeConnection() {
   }
 }
 
+// Retrieve AI provider settings
+export async function getAIProviderSettings() {
+  try {
+    const result = await pool.query(`
+      SELECT provider_type, model_name, api_url, api_key, is_active
+      FROM ai_provider_settings
+      ORDER BY provider_type
+    `);
+
+    const providers = {};
+    let activeProvider = null;
+
+    result.rows.forEach((row) => {
+      providers[row.provider_type] = {
+        modelName: row.model_name,
+        apiUrl: row.api_url || '',
+        apiKey: row.api_key || '',
+      };
+
+      if (row.is_active) {
+        activeProvider = row.provider_type;
+      }
+    });
+
+    return {
+      activeProvider,
+      providers,
+    };
+  } catch (error) {
+    console.error('Failed to fetch AI provider settings:', error);
+    throw error;
+  }
+}
+
+// Save AI provider settings
+export async function saveAIProviderSettings({ activeProvider, providers }) {
+  if (!activeProvider) {
+    throw new Error('activeProvider is required');
+  }
+
+  const providerEntries = Object.entries(providers || {});
+  if (providerEntries.length === 0) {
+    throw new Error('providers payload is required');
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    await client.query('UPDATE ai_provider_settings SET is_active = FALSE, updated_at = NOW()');
+
+    for (const [providerType, config] of providerEntries) {
+      if (!config || !config.modelName) {
+        throw new Error(`modelName is required for provider ${providerType}`);
+      }
+
+      await client.query(
+        `
+          INSERT INTO ai_provider_settings (provider_type, model_name, api_url, api_key, is_active, updated_at)
+          VALUES ($1, $2, $3, $4, $5, NOW())
+          ON CONFLICT (provider_type)
+          DO UPDATE SET
+            model_name = EXCLUDED.model_name,
+            api_url = EXCLUDED.api_url,
+            api_key = EXCLUDED.api_key,
+            is_active = EXCLUDED.is_active,
+            updated_at = NOW()
+        `,
+        [
+          providerType,
+          config.modelName,
+          config.apiUrl || null,
+          config.apiKey || null,
+          providerType === activeProvider,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to save AI provider settings:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return getAIProviderSettings();
+}
+

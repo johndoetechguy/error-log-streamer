@@ -23,6 +23,21 @@ CREATE INDEX IF NOT EXISTS idx_error_logs_category ON error_logs(error_category)
 CREATE INDEX IF NOT EXISTS idx_error_logs_service_name ON error_logs(service_name);
 CREATE INDEX IF NOT EXISTS idx_error_logs_created_at ON error_logs(created_at);
 
+-- AI provider configuration table
+CREATE TABLE IF NOT EXISTS ai_provider_settings (
+  id SERIAL PRIMARY KEY,
+  provider_type VARCHAR(50) UNIQUE NOT NULL,
+  model_name VARCHAR(255) NOT NULL,
+  api_url TEXT,
+  api_key TEXT,
+  is_active BOOLEAN DEFAULT FALSE,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Ensure only one provider can be active at a time
+CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_active ON ai_provider_settings ((is_active)) WHERE is_active = TRUE;
+
 -- Create a view for analytics
 CREATE OR REPLACE VIEW error_logs_analytics AS
 SELECT 

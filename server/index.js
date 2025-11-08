@@ -7,7 +7,7 @@ import { createServer } from 'http';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { generateSyntheticError } from './services/geminiService.js';
-import { insertErrorLog, getErrorLogs, getAnalytics } from './db/postgres.js';
+import { insertErrorLog, getErrorLogs, getAnalytics, getAIProviderSettings, saveAIProviderSettings } from './db/postgres.js';
 
 dotenv.config();
 
@@ -181,44 +181,67 @@ app.get('/api/stop-stream', (req, res) => {
 });
 
 // GET /api/config
-app.get('/api/config', (req, res) => {
-  res.json({
-    interval: config.interval,
-    template: config.template,
-    isStreaming
-  });
+app.get('/api/config', async (req, res) => {
+  try {
+    const aiProvider = await getAIProviderSettings();
+    res.json({
+      interval: config.interval,
+      template: config.template,
+      isStreaming,
+      aiProvider
+    });
+  } catch (error) {
+    console.error('Error fetching config:', error);
+    res.status(500).json({ error: 'Failed to fetch config' });
+  }
 });
 
 // POST /api/config
-app.post('/api/config', (req, res) => {
-  const { interval, template } = req.body;
+app.post('/api/config', async (req, res) => {
+  const { interval, template, aiProvider } = req.body;
 
-  if (interval !== undefined) {
-    if (interval < 1000 || interval > 10000) {
-      return res.status(400).json({ 
-        error: 'Interval must be between 1000ms (1s) and 10000ms (10s)' 
-      });
+  try {
+    if (interval !== undefined) {
+      if (interval < 1000 || interval > 10000) {
+        return res.status(400).json({ 
+          error: 'Interval must be between 1000ms (1s) and 10000ms (10s)' 
+        });
+      }
+      config.interval = interval;
+      
+      // If streaming, restart with new interval
+      if (isStreaming) {
+        stopStream();
+        startStream(interval);
+      }
     }
-    config.interval = interval;
-    
-    // If streaming, restart with new interval
-    if (isStreaming) {
-      stopStream();
-      startStream(interval);
+
+    if (template !== undefined) {
+      config.template = template;
     }
+
+    let providerSettings = null;
+    if (aiProvider) {
+      providerSettings = await saveAIProviderSettings(aiProvider);
+    } else {
+      providerSettings = await getAIProviderSettings();
+    }
+
+    res.json({
+      success: true,
+      config: {
+        interval: config.interval,
+        template: config.template
+      },
+      aiProvider: providerSettings
+    });
+  } catch (error) {
+    console.error('Error updating config:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update configuration'
+    });
   }
-
-  if (template !== undefined) {
-    config.template = template;
-  }
-
-  res.json({
-    success: true,
-    config: {
-      interval: config.interval,
-      template: config.template
-    }
-  });
 });
 
 // POST /api/generate-error (single generation)

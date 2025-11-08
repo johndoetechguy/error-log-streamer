@@ -27,6 +27,70 @@ Rules:
 - Include realistic stack traces and random UUIDs
 - errorCategory must be one of: API_FAILURE, VALIDATION_ERROR, SYSTEM_ERROR, NETWORK_FAILURE`;
 
+type ProviderType = "gemini" | "ollama";
+
+interface ProviderConfig {
+  modelName: string;
+  apiUrl: string;
+  apiKey?: string;
+}
+
+const PROVIDER_TYPES: ProviderType[] = ["gemini", "ollama"];
+
+const DEFAULT_PROVIDER_SETTINGS: Record<ProviderType, ProviderConfig> = {
+  gemini: {
+    modelName: "gemini-2.5-flash-preview-05-20",
+    apiUrl: "https://generativelanguage.googleapis.com",
+    apiKey: "",
+  },
+  ollama: {
+    modelName: "llama3.1",
+    apiUrl: "http://localhost:11434",
+    apiKey: "",
+  },
+};
+
+const PROVIDER_METADATA: Record<
+  ProviderType,
+  { title: string; description: string; apiKeyHelper: string }
+> = {
+  gemini: {
+    title: "Gemini",
+    description: "Hosted Gemini API via Google AI Studio",
+    apiKeyHelper: "API key required. Store securely in .env for production use.",
+  },
+  ollama: {
+    title: "Ollama",
+    description: "Self-hosted Ollama instance for local inference",
+    apiKeyHelper: "Optional: only needed if your Ollama endpoint enforces authentication.",
+  },
+};
+
+const createDefaultProviderSettings = (): Record<ProviderType, ProviderConfig> => ({
+  gemini: { ...DEFAULT_PROVIDER_SETTINGS.gemini },
+  ollama: { ...DEFAULT_PROVIDER_SETTINGS.ollama },
+});
+
+const mergeProviderSettings = (
+  input?: Partial<Record<ProviderType, Partial<ProviderConfig>>>
+): Record<ProviderType, ProviderConfig> => {
+  const defaults = createDefaultProviderSettings();
+
+  if (!input) {
+    return defaults;
+  }
+
+  return PROVIDER_TYPES.reduce((acc, provider) => {
+    const providerInput = input[provider] || {};
+    acc[provider] = {
+      modelName: providerInput.modelName || defaults[provider].modelName,
+      apiUrl: providerInput.apiUrl || defaults[provider].apiUrl,
+      apiKey: providerInput.apiKey ?? defaults[provider].apiKey,
+    };
+    return acc;
+  }, {} as Record<ProviderType, ProviderConfig>);
+};
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 const Settings = () => {
@@ -34,6 +98,24 @@ const Settings = () => {
   const [interval, setInterval] = useState(5000);
   const [template, setTemplate] = useState(DEFAULT_PROMPT);
   const [loading, setLoading] = useState(false);
+  const [activeProvider, setActiveProvider] = useState<ProviderType>("gemini");
+  const [providerSettings, setProviderSettings] = useState<Record<ProviderType, ProviderConfig>>(
+    () => createDefaultProviderSettings()
+  );
+
+  const updateProviderField = (
+    provider: ProviderType,
+    field: keyof ProviderConfig,
+    value: string
+  ) => {
+    setProviderSettings((prev) => ({
+      ...prev,
+      [provider]: {
+        ...prev[provider],
+        [field]: value,
+      },
+    }));
+  };
 
   // Load settings from server and localStorage
   useEffect(() => {
@@ -45,6 +127,15 @@ const Settings = () => {
           const serverConfig = await response.json();
           setInterval(serverConfig.interval || 5000);
           setTemplate(serverConfig.template || DEFAULT_PROMPT);
+          if (serverConfig.aiProvider) {
+            const { activeProvider: active, providers } = serverConfig.aiProvider;
+            if (active && PROVIDER_TYPES.includes(active)) {
+              setActiveProvider(active);
+            }
+            if (providers) {
+              setProviderSettings(mergeProviderSettings(providers));
+            }
+          }
         } else {
           // Fallback to localStorage
           const stored = localStorage.getItem("streamer-settings");
@@ -52,6 +143,13 @@ const Settings = () => {
             const settings = JSON.parse(stored);
             setInterval(settings.interval || 5000);
             setTemplate(settings.template || DEFAULT_PROMPT);
+            if (settings.aiProvider) {
+              const { activeProvider: active, providers } = settings.aiProvider;
+              if (active && PROVIDER_TYPES.includes(active)) {
+                setActiveProvider(active);
+              }
+              setProviderSettings(mergeProviderSettings(providers));
+            }
           }
         }
       } catch (error) {
@@ -62,6 +160,13 @@ const Settings = () => {
           const settings = JSON.parse(stored);
           setInterval(settings.interval || 5000);
           setTemplate(settings.template || DEFAULT_PROMPT);
+          if (settings.aiProvider) {
+            const { activeProvider: active, providers } = settings.aiProvider;
+            if (active && PROVIDER_TYPES.includes(active)) {
+              setActiveProvider(active);
+            }
+            setProviderSettings(mergeProviderSettings(providers));
+          }
         }
       }
     };
@@ -72,19 +177,56 @@ const Settings = () => {
   const saveSettings = async () => {
     setLoading(true);
     try {
+      const payload = {
+        interval,
+        template,
+        aiProvider: {
+          activeProvider,
+          providers: providerSettings,
+        },
+      };
+
       // Save to server
       const response = await fetch(`${API_URL}/api/config`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ interval, template }),
+        body: JSON.stringify(payload),
       });
 
       if (response.ok) {
-        // Also save to localStorage as backup
-        const settings = { interval, template };
-        localStorage.setItem("streamer-settings", JSON.stringify(settings));
+        const data = await response.json();
+        if (data?.aiProvider) {
+          if (data.aiProvider.activeProvider && PROVIDER_TYPES.includes(data.aiProvider.activeProvider)) {
+            setActiveProvider(data.aiProvider.activeProvider);
+          }
+          if (data.aiProvider.providers) {
+            const merged = mergeProviderSettings(data.aiProvider.providers);
+            setProviderSettings(merged);
+            const settingsToPersist = {
+              interval: data.config?.interval ?? interval,
+              template: data.config?.template ?? template,
+              aiProvider: {
+                activeProvider: data.aiProvider.activeProvider ?? activeProvider,
+                providers: merged,
+              },
+            };
+            localStorage.setItem("streamer-settings", JSON.stringify(settingsToPersist));
+          }
+        } else {
+          localStorage.setItem(
+            "streamer-settings",
+            JSON.stringify({
+              interval,
+              template,
+              aiProvider: {
+                activeProvider,
+                providers: providerSettings,
+              },
+            })
+          );
+        }
         toast.success("Settings saved successfully");
       } else {
         throw new Error("Failed to save settings to server");
@@ -92,7 +234,14 @@ const Settings = () => {
     } catch (error) {
       console.error("Error saving settings:", error);
       // Fallback: save to localStorage only
-      const settings = { interval, template };
+      const settings = {
+        interval,
+        template,
+        aiProvider: {
+          activeProvider,
+          providers: providerSettings,
+        },
+      };
       localStorage.setItem("streamer-settings", JSON.stringify(settings));
       toast.warning("Settings saved locally (server unavailable)");
     } finally {
@@ -103,12 +252,14 @@ const Settings = () => {
   const resetSettings = () => {
     setInterval(5000);
     setTemplate(DEFAULT_PROMPT);
+    setActiveProvider("gemini");
+    setProviderSettings(createDefaultProviderSettings());
     localStorage.removeItem("streamer-settings");
     toast.info("Settings reset to defaults");
   };
 
   return (
-    <div className="space-y-6 max-w-4xl">
+    <div className="space-y-6 w-full">
       <div>
         <h1 className="text-3xl font-bold">Settings</h1>
         <p className="text-muted-foreground">
@@ -145,6 +296,101 @@ const Settings = () => {
           <p className="text-sm text-muted-foreground">
             This prompt will be sent to Gemini AI to generate synthetic errors
           </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label>Active AI Provider</Label>
+          <Select
+            value={activeProvider}
+            onValueChange={(value) => setActiveProvider(value as ProviderType)}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Select provider" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="gemini">Gemini</SelectItem>
+              <SelectItem value="ollama">Ollama</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-sm text-muted-foreground">
+            Only the active provider will be used for streaming. Configure both to switch
+            quickly without re-entering credentials.
+          </p>
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
+          {PROVIDER_TYPES.map((provider) => {
+            const config = providerSettings[provider];
+            const meta = PROVIDER_METADATA[provider];
+            const isActive = provider === activeProvider;
+            return (
+              <div
+                key={provider}
+                className={`space-y-4 rounded-md border p-4 transition-shadow ${
+                  isActive ? "border-primary shadow-sm" : "border-border"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-sm font-medium">{meta.title}</h3>
+                    <p className="text-xs text-muted-foreground">{meta.description}</p>
+                  </div>
+                  {isActive ? (
+                    <span className="text-xs font-semibold text-primary">Active</span>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setActiveProvider(provider)}
+                    >
+                      Set Active
+                    </Button>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor={`${provider}-model`}>Model Name</Label>
+                  <Input
+                    id={`${provider}-model`}
+                    value={config.modelName}
+                    onChange={(e) =>
+                      updateProviderField(provider, "modelName", e.target.value)
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor={`${provider}-url`}>API URL</Label>
+                  <Input
+                    id={`${provider}-url`}
+                    value={config.apiUrl}
+                    onChange={(e) => updateProviderField(provider, "apiUrl", e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {provider === "gemini"
+                      ? "Base REST endpoint for Gemini (e.g. https://generativelanguage.googleapis.com)"
+                      : "Base URL for your Ollama instance (e.g. http://localhost:11434)"}
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor={`${provider}-key`}>
+                    API Key {provider === "ollama" ? "(optional)" : ""}
+                  </Label>
+                  <Input
+                    id={`${provider}-key`}
+                    type="password"
+                    value={config.apiKey}
+                    onChange={(e) =>
+                      updateProviderField(provider, "apiKey", e.target.value)
+                    }
+                    placeholder={provider === "ollama" ? "Optional" : "Required"}
+                  />
+                  <p className="text-xs text-muted-foreground">{meta.apiKeyHelper}</p>
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <div className="space-y-2">
