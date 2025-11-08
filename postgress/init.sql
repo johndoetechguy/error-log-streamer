@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS ai_provider_settings (
 -- Ensure only one provider can be active at a time
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_active ON ai_provider_settings ((is_active)) WHERE is_active = TRUE;
 
+-- Application configuration key/value store
+CREATE TABLE IF NOT EXISTS app_config (
+  id SERIAL PRIMARY KEY,
+  key TEXT UNIQUE NOT NULL,
+  value TEXT NOT NULL,
+  description TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Create a view for analytics
 CREATE OR REPLACE VIEW error_logs_analytics AS
 SELECT 

@@ -120,6 +120,75 @@ export async function closeConnection() {
   }
 }
 
+// Generic app configuration helpers
+export async function getAppConfig(keys = []) {
+  try {
+    const params = keys.length
+      ? {
+          text: `
+            SELECT key, value
+            FROM app_config
+            WHERE key = ANY($1::text[])
+          `,
+          values: [keys],
+        }
+      : {
+          text: `
+            SELECT key, value
+            FROM app_config
+          `,
+        };
+
+    const result = await pool.query(params);
+    const config = {};
+
+    result.rows.forEach((row) => {
+      config[row.key] = row.value;
+    });
+
+    return config;
+  } catch (error) {
+    console.error('Failed to fetch app configuration:', error);
+    throw error;
+  }
+}
+
+export async function upsertAppConfig(entries) {
+  if (!entries || typeof entries !== 'object') {
+    throw new Error('entries must be a key-value object');
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    for (const [key, value] of Object.entries(entries)) {
+      await client.query(
+        `
+          INSERT INTO app_config (key, value, updated_at)
+          VALUES ($1, $2, NOW())
+          ON CONFLICT (key)
+          DO UPDATE SET
+            value = EXCLUDED.value,
+            updated_at = NOW()
+        `,
+        [key, value],
+      );
+    }
+
+    await client.query('COMMIT');
+
+    return getAppConfig(Object.keys(entries));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to upsert app configuration:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 // Retrieve AI provider settings
 export async function getAIProviderSettings() {
   try {

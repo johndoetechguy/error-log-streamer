@@ -35,6 +35,10 @@ interface ProviderConfig {
   apiKey?: string;
 }
 
+interface AppConfigState {
+  VITE_API_URL: string;
+}
+
 const PROVIDER_TYPES: ProviderType[] = ["gemini", "ollama"];
 
 const DEFAULT_PROVIDER_SETTINGS: Record<ProviderType, ProviderConfig> = {
@@ -48,6 +52,10 @@ const DEFAULT_PROVIDER_SETTINGS: Record<ProviderType, ProviderConfig> = {
     apiUrl: "http://localhost:11434",
     apiKey: "",
   },
+};
+
+const DEFAULT_APP_CONFIG: AppConfigState = {
+  VITE_API_URL: import.meta.env.VITE_API_URL || "http://localhost:3000",
 };
 
 const PROVIDER_METADATA: Record<
@@ -102,6 +110,7 @@ const Settings = () => {
   const [providerSettings, setProviderSettings] = useState<Record<ProviderType, ProviderConfig>>(
     () => createDefaultProviderSettings()
   );
+  const [appConfig, setAppConfig] = useState<AppConfigState>(DEFAULT_APP_CONFIG);
 
   const updateProviderField = (
     provider: ProviderType,
@@ -127,6 +136,12 @@ const Settings = () => {
           const serverConfig = await response.json();
           setInterval(serverConfig.interval || 5000);
           setTemplate(serverConfig.template || DEFAULT_PROMPT);
+          if (serverConfig.appConfig) {
+            setAppConfig({
+              ...DEFAULT_APP_CONFIG,
+              ...serverConfig.appConfig,
+            });
+          }
           if (serverConfig.aiProvider) {
             const { activeProvider: active, providers } = serverConfig.aiProvider;
             if (active && PROVIDER_TYPES.includes(active)) {
@@ -143,6 +158,12 @@ const Settings = () => {
             const settings = JSON.parse(stored);
             setInterval(settings.interval || 5000);
             setTemplate(settings.template || DEFAULT_PROMPT);
+            if (settings.appConfig) {
+              setAppConfig({
+                ...DEFAULT_APP_CONFIG,
+                ...settings.appConfig,
+              });
+            }
             if (settings.aiProvider) {
               const { activeProvider: active, providers } = settings.aiProvider;
               if (active && PROVIDER_TYPES.includes(active)) {
@@ -160,6 +181,12 @@ const Settings = () => {
           const settings = JSON.parse(stored);
           setInterval(settings.interval || 5000);
           setTemplate(settings.template || DEFAULT_PROMPT);
+          if (settings.appConfig) {
+            setAppConfig({
+              ...DEFAULT_APP_CONFIG,
+              ...settings.appConfig,
+            });
+          }
           if (settings.aiProvider) {
             const { activeProvider: active, providers } = settings.aiProvider;
             if (active && PROVIDER_TYPES.includes(active)) {
@@ -184,6 +211,7 @@ const Settings = () => {
           activeProvider,
           providers: providerSettings,
         },
+        appConfig,
       };
 
       // Save to server
@@ -197,36 +225,40 @@ const Settings = () => {
 
       if (response.ok) {
         const data = await response.json();
+
+        let nextActiveProvider = activeProvider;
+        let nextProviderSettings = providerSettings;
+
         if (data?.aiProvider) {
           if (data.aiProvider.activeProvider && PROVIDER_TYPES.includes(data.aiProvider.activeProvider)) {
+            nextActiveProvider = data.aiProvider.activeProvider;
             setActiveProvider(data.aiProvider.activeProvider);
           }
           if (data.aiProvider.providers) {
-            const merged = mergeProviderSettings(data.aiProvider.providers);
-            setProviderSettings(merged);
-            const settingsToPersist = {
-              interval: data.config?.interval ?? interval,
-              template: data.config?.template ?? template,
-              aiProvider: {
-                activeProvider: data.aiProvider.activeProvider ?? activeProvider,
-                providers: merged,
-              },
-            };
-            localStorage.setItem("streamer-settings", JSON.stringify(settingsToPersist));
+            nextProviderSettings = mergeProviderSettings(data.aiProvider.providers);
+            setProviderSettings(nextProviderSettings);
           }
-        } else {
-          localStorage.setItem(
-            "streamer-settings",
-            JSON.stringify({
-              interval,
-              template,
-              aiProvider: {
-                activeProvider,
-                providers: providerSettings,
-              },
-            })
-          );
         }
+
+        let nextAppConfig = appConfig;
+        if (data?.appConfig) {
+          nextAppConfig = {
+            ...DEFAULT_APP_CONFIG,
+            ...data.appConfig,
+          };
+          setAppConfig(nextAppConfig);
+        }
+
+        const settingsToPersist = {
+          interval: data.config?.interval ?? interval,
+          template: data.config?.template ?? template,
+          appConfig: nextAppConfig,
+          aiProvider: {
+            activeProvider: nextActiveProvider,
+            providers: nextProviderSettings,
+          },
+        };
+        localStorage.setItem("streamer-settings", JSON.stringify(settingsToPersist));
         toast.success("Settings saved successfully");
       } else {
         throw new Error("Failed to save settings to server");
@@ -237,6 +269,7 @@ const Settings = () => {
       const settings = {
         interval,
         template,
+        appConfig,
         aiProvider: {
           activeProvider,
           providers: providerSettings,
@@ -252,6 +285,7 @@ const Settings = () => {
   const resetSettings = () => {
     setInterval(5000);
     setTemplate(DEFAULT_PROMPT);
+    setAppConfig(DEFAULT_APP_CONFIG);
     setActiveProvider("gemini");
     setProviderSettings(createDefaultProviderSettings());
     localStorage.removeItem("streamer-settings");
@@ -295,6 +329,24 @@ const Settings = () => {
           />
           <p className="text-sm text-muted-foreground">
             This prompt will be sent to Gemini AI to generate synthetic errors
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="app-api-url">VITE_API_URL</Label>
+          <Input
+            id="app-api-url"
+            value={appConfig.VITE_API_URL}
+            onChange={(e) =>
+              setAppConfig((prev) => ({
+                ...prev,
+                VITE_API_URL: e.target.value,
+              }))
+            }
+          />
+          <p className="text-sm text-muted-foreground">
+            Base API URL exposed to the frontend build pipeline. Update this when pointing the dashboard to a different
+            backend environment.
           </p>
         </div>
 

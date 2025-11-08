@@ -23,12 +23,44 @@ interface ErrorLog {
   errorStackTrace: string;
 }
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
-const WS_URL = (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/^http/, "ws") + "/ws/stream";
+const HARD_DEFAULT_API_URL = "http://localhost:3000";
+const RAW_ENV_API_URL = import.meta.env.VITE_API_URL || HARD_DEFAULT_API_URL;
+
+function normalizeApiBase(url: string): string {
+  if (!url) {
+    return HARD_DEFAULT_API_URL;
+  }
+
+  return url.trim().replace(/\/+$/, "");
+}
+
+function buildWebSocketUrl(baseUrl: string): string {
+  const normalized = normalizeApiBase(baseUrl);
+
+  try {
+    const url = new URL(normalized);
+    if (url.protocol === "https:") {
+      url.protocol = "wss:";
+    } else if (url.protocol === "http:") {
+      url.protocol = "ws:";
+    }
+    url.pathname = url.pathname.replace(/\/+$/, "") + "/ws/stream";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return `${normalized}/ws/stream`;
+  }
+}
+
+const DEFAULT_API_URL = normalizeApiBase(RAW_ENV_API_URL);
+const DEFAULT_WS_URL = buildWebSocketUrl(DEFAULT_API_URL);
 
 const Dashboard = () => {
   const [logs, setLogs] = useState<ErrorLog[]>([]);
-  const { isConnected, isStreaming, lastMessage } = useWebSocket(WS_URL);
+  const [apiBaseUrl, setApiBaseUrl] = useState<string>(DEFAULT_API_URL);
+  const [wsUrl, setWsUrl] = useState<string>(DEFAULT_WS_URL);
+  const { isConnected, isStreaming, lastMessage } = useWebSocket(wsUrl);
 
   // Handle WebSocket messages
   useEffect(() => {
@@ -53,6 +85,55 @@ const Dashboard = () => {
     }
   }, [isConnected, hasShownConnectionStatus]);
 
+  // Hydrate base URL from local storage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("streamer-settings");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        const storedApi = parsed?.appConfig?.VITE_API_URL;
+        if (typeof storedApi === "string" && storedApi.trim().length > 0) {
+          setApiBaseUrl(normalizeApiBase(storedApi));
+        }
+      }
+    } catch (error) {
+      console.error("Error reading stored settings:", error);
+    }
+  }, []);
+
+  // Fetch configuration from backend to pick up server-side base URL
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadConfig = async () => {
+      try {
+        const response = await fetch(`${DEFAULT_API_URL}/api/config`);
+        if (!response.ok) {
+          return;
+        }
+        const data = await response.json();
+        const configuredApiUrl = data?.appConfig?.VITE_API_URL;
+        if (!cancelled && typeof configuredApiUrl === "string" && configuredApiUrl.trim().length > 0) {
+          setApiBaseUrl(normalizeApiBase(configuredApiUrl));
+        }
+      } catch (error) {
+        console.error("Error loading app configuration:", error);
+      }
+    };
+
+    loadConfig();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Keep websocket endpoint in sync with base API URL
+  useEffect(() => {
+    const nextWsUrl = buildWebSocketUrl(apiBaseUrl);
+    setWsUrl((prev) => (prev === nextWsUrl ? prev : nextWsUrl));
+  }, [apiBaseUrl]);
+
   const fetchSettings = () => {
     const stored = localStorage.getItem("streamer-settings");
     return stored
@@ -63,10 +144,11 @@ const Dashboard = () => {
   const toggleStream = async () => {
     try {
       const settings = fetchSettings();
+      const baseUrl = apiBaseUrl || DEFAULT_API_URL;
       
       if (isStreaming) {
         // Stop stream
-        const response = await fetch(`${API_URL}/api/stop-stream`);
+        const response = await fetch(`${baseUrl}/api/stop-stream`);
         if (response.ok) {
           toast.info("Stream stopped");
         } else {
@@ -74,7 +156,7 @@ const Dashboard = () => {
         }
       } else {
         // Start stream
-        const response = await fetch(`${API_URL}/api/start-stream?interval=${settings.interval}`);
+        const response = await fetch(`${baseUrl}/api/start-stream?interval=${settings.interval}`);
         if (response.ok) {
           toast.success("Stream started");
         } else {
@@ -90,7 +172,8 @@ const Dashboard = () => {
 
   const generateLog = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/generate-error`, {
+      const baseUrl = apiBaseUrl || DEFAULT_API_URL;
+      const response = await fetch(`${baseUrl}/api/generate-error`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

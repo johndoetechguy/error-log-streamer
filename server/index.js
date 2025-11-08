@@ -7,7 +7,15 @@ import { createServer } from 'http';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { generateSyntheticError } from './services/geminiService.js';
-import { insertErrorLog, getErrorLogs, getAnalytics, getAIProviderSettings, saveAIProviderSettings } from './db/postgres.js';
+import {
+  insertErrorLog,
+  getErrorLogs,
+  getAnalytics,
+  getAIProviderSettings,
+  saveAIProviderSettings,
+  getAppConfig,
+  upsertAppConfig,
+} from './db/postgres.js';
 
 dotenv.config();
 
@@ -44,6 +52,72 @@ Rules:
 - All UUIDs must be valid v4 format
 - The stack trace must look authentic with multiple nested calls (e.g., DAO → Manager → Service)`
 };
+
+const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash-preview-05-20';
+const FALLBACK_GEMINI_API_URL = 'https://generativelanguage.googleapis.com';
+const FALLBACK_OLLAMA_MODEL = 'llama3.1';
+const FALLBACK_OLLAMA_API_URL = 'http://localhost:11434';
+
+async function resolveActiveAIProviderConfig() {
+  const aiSettings = await getAIProviderSettings();
+  const providerType = aiSettings.activeProvider;
+
+  if (!providerType) {
+    if (process.env.GEMINI_API_KEY) {
+      return {
+        type: 'gemini',
+        modelName: FALLBACK_GEMINI_MODEL,
+        apiUrl: FALLBACK_GEMINI_API_URL,
+        apiKey: process.env.GEMINI_API_KEY,
+      };
+    }
+    throw new Error('No AI provider configured. Please configure one in Settings.');
+  }
+
+  const providerConfig = aiSettings.providers?.[providerType];
+  if (!providerConfig) {
+    throw new Error(`Configuration missing for provider "${providerType}".`);
+  }
+
+  const resolved = {
+    type: providerType,
+    modelName:
+      providerConfig.modelName ||
+      (providerType === 'gemini'
+        ? FALLBACK_GEMINI_MODEL
+        : providerType === 'ollama'
+          ? FALLBACK_OLLAMA_MODEL
+          : null),
+    apiUrl:
+      providerConfig.apiUrl ||
+      (providerType === 'gemini'
+        ? FALLBACK_GEMINI_API_URL
+        : providerType === 'ollama'
+          ? FALLBACK_OLLAMA_API_URL
+          : null),
+    apiKey:
+      providerConfig.apiKey ||
+      (providerType === 'gemini'
+        ? process.env.GEMINI_API_KEY
+        : providerType === 'ollama'
+          ? process.env.OLLAMA_API_KEY
+          : undefined),
+  };
+
+  if (!resolved.modelName) {
+    throw new Error(`Model name is required for provider "${providerType}".`);
+  }
+
+  if (providerType === 'gemini' && !resolved.apiKey) {
+    throw new Error('Gemini API key is not configured. Please update the provider settings.');
+  }
+
+  if (!resolved.apiUrl) {
+    throw new Error(`API URL is required for provider "${providerType}".`);
+  }
+
+  return resolved;
+}
 
 // Streaming state
 let streamInterval = null;
@@ -123,7 +197,11 @@ function stopStream() {
 // Generate error log and broadcast
 async function generateAndBroadcast() {
   try {
-    const errorLog = await generateSyntheticError(config.template);
+    const provider = await resolveActiveAIProviderConfig();
+    const errorLog = await generateSyntheticError({
+      prompt: config.template,
+      provider,
+    });
     
     if (errorLog) {
       // Save to PostgreSQL
@@ -184,11 +262,19 @@ app.get('/api/stop-stream', (req, res) => {
 app.get('/api/config', async (req, res) => {
   try {
     const aiProvider = await getAIProviderSettings();
+    const defaultApiUrl = process.env.VITE_API_URL || 'http://localhost:3000';
+    let appConfig = await getAppConfig(['VITE_API_URL']);
+
+    if (!appConfig.VITE_API_URL) {
+      appConfig = await upsertAppConfig({ VITE_API_URL: defaultApiUrl });
+    }
+
     res.json({
       interval: config.interval,
       template: config.template,
       isStreaming,
-      aiProvider
+      aiProvider,
+      appConfig,
     });
   } catch (error) {
     console.error('Error fetching config:', error);
@@ -198,7 +284,7 @@ app.get('/api/config', async (req, res) => {
 
 // POST /api/config
 app.post('/api/config', async (req, res) => {
-  const { interval, template, aiProvider } = req.body;
+  const { interval, template, aiProvider, appConfig: appConfigPayload } = req.body;
 
   try {
     if (interval !== undefined) {
@@ -221,10 +307,17 @@ app.post('/api/config', async (req, res) => {
     }
 
     let providerSettings = null;
+    let persistedAppConfig = null;
     if (aiProvider) {
       providerSettings = await saveAIProviderSettings(aiProvider);
     } else {
       providerSettings = await getAIProviderSettings();
+    }
+
+    if (appConfigPayload) {
+      persistedAppConfig = await upsertAppConfig(appConfigPayload);
+    } else {
+      persistedAppConfig = await getAppConfig(['VITE_API_URL']);
     }
 
     res.json({
@@ -233,7 +326,8 @@ app.post('/api/config', async (req, res) => {
         interval: config.interval,
         template: config.template
       },
-      aiProvider: providerSettings
+      aiProvider: providerSettings,
+      appConfig: persistedAppConfig
     });
   } catch (error) {
     console.error('Error updating config:', error);
@@ -247,7 +341,11 @@ app.post('/api/config', async (req, res) => {
 // POST /api/generate-error (single generation)
 app.post('/api/generate-error', async (req, res) => {
   try {
-    const errorLog = await generateSyntheticError(config.template);
+    const provider = await resolveActiveAIProviderConfig();
+    const errorLog = await generateSyntheticError({
+      prompt: config.template,
+      provider,
+    });
     
     if (!errorLog) {
       return res.status(500).json({ error: 'Failed to generate error log' });

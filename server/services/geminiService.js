@@ -1,5 +1,5 @@
-// Gemini AI service for generating synthetic error logs
-// Uses Google Gemini API directly via REST API
+// Gemini / AI provider service for generating synthetic error logs
+// Supports configuration-driven providers with Gemini as the default implementation.
 
 const DEFAULT_PROMPT = `You are a streaming data generator. Produce one realistic API error event in JSON format only.
 
@@ -16,91 +16,198 @@ Rules:
 - All UUIDs must be valid v4 format
 - The stack trace must look authentic with multiple nested calls (e.g., DAO → Manager → Service)`;
 
-export async function generateSyntheticError(customPrompt = null) {
-  const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-  
-  if (!GEMINI_API_KEY) {
-    throw new Error('GEMINI_API_KEY is not configured');
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-preview-05-20';
+const DEFAULT_GEMINI_API_URL = 'https://generativelanguage.googleapis.com';
+const DEFAULT_OLLAMA_MODEL = 'llama3.1';
+const DEFAULT_OLLAMA_API_URL = 'http://localhost:11434';
+
+function normaliseBaseUrl(url, fallback = DEFAULT_GEMINI_API_URL) {
+  const value = url || fallback;
+  return value.replace(/\/+$/, '');
+}
+
+async function callGeminiAPI({ prompt, modelName, apiUrl, apiKey }) {
+  const resolvedApiKey = apiKey || process.env.GEMINI_API_KEY;
+  if (!resolvedApiKey) {
+    throw new Error('Gemini API key is not configured. Please set it in the Settings page or environment.');
   }
 
+  const model = modelName || DEFAULT_GEMINI_MODEL;
+  const baseUrl = normaliseBaseUrl(apiUrl, DEFAULT_GEMINI_API_URL);
+  const endpoint = `${baseUrl}/v1beta/models/${model}:generateContent?key=${resolvedApiKey}`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Gemini API error:', response.status, errorText);
+
+    if (response.status === 429) {
+      throw new Error('Rate limit exceeded. Please try again later.');
+    }
+
+    if (response.status === 403 || response.status === 401) {
+      throw new Error('API key invalid or quota exceeded. Please check your Gemini API key.');
+    }
+
+    throw new Error(`Gemini API error: ${response.status} - ${errorText.substring(0, 200)}`);
+  }
+
+  return response.json();
+}
+
+async function callOllamaAPI({ prompt, modelName, apiUrl, apiKey }) {
+  const model = modelName || DEFAULT_OLLAMA_MODEL;
+  const baseUrl = normaliseBaseUrl(apiUrl, DEFAULT_OLLAMA_API_URL);
+  const endpoint = `${baseUrl}/api/chat`;
+
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+  }
+
+  const body = {
+    model,
+    stream: false,
+    messages: [
+      {
+        role: 'system',
+        content: 'You are a streaming data generator that must respond with valid JSON only.',
+      },
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ],
+  };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error('Ollama API error:', response.status, errorText);
+    throw new Error(`Ollama API error: ${response.status} - ${errorText.substring(0, 200)}`);
+  }
+
+  const data = await response.json();
+
+  if (data?.error) {
+    throw new Error(`Ollama API error: ${data.error}`);
+  }
+
+  const content =
+    data?.message?.content ||
+    data?.messages?.[0]?.content ||
+    (Array.isArray(data?.output) ? data.output.join('') : null);
+
+  if (!content) {
+    console.error('Unexpected Ollama response:', JSON.stringify(data, null, 2));
+    throw new Error('No content generated from Ollama');
+  }
+
+  return content;
+}
+
+function sanitiseGeneratedText(raw) {
+  let cleaned = raw.trim();
+
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.replace(/```json\s*/g, '').replace(/```$/g, '').trim();
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.replace(/```\s*/g, '').replace(/```$/g, '').trim();
+  }
+
+  return cleaned;
+}
+
+export async function generateSyntheticError({ prompt: customPrompt = null, provider } = {}) {
   const prompt = customPrompt || DEFAULT_PROMPT;
 
   try {
-    // Use REST API directly with available model
-    // Available models: gemini-2.5-flash-preview-05-20, gemini-2.5-pro-preview-03-25
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: prompt,
-                },
-              ],
-            },
-          ],
-        }),
+    const providerType = provider?.type || 'gemini';
+
+    if (providerType === 'gemini') {
+      const data = await callGeminiAPI({
+        prompt,
+        modelName: provider?.modelName || DEFAULT_GEMINI_MODEL,
+        apiUrl: provider?.apiUrl || DEFAULT_GEMINI_API_URL,
+        apiKey: provider?.apiKey,
+      });
+
+      const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+      if (!generatedText) {
+        console.error('No content in response:', JSON.stringify(data, null, 2));
+        throw new Error('No content generated from Gemini');
       }
-    );
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Gemini API error:', response.status, errorText);
-      
-      if (response.status === 429) {
-        throw new Error('Rate limit exceeded. Please try again later.');
+      const cleanedText = sanitiseGeneratedText(generatedText);
+
+      try {
+        const errorLog = JSON.parse(cleanedText);
+        return errorLog;
+      } catch (parseError) {
+        console.error('JSON parse error:', parseError);
+        console.error('Attempted to parse:', cleanedText);
+        throw new Error('Invalid JSON generated by Gemini');
       }
-      
-      if (response.status === 403 || response.status === 401) {
-        throw new Error('API key invalid or quota exceeded. Please check your Gemini API key.');
+    }
+
+    if (providerType === 'ollama') {
+      const rawText = await callOllamaAPI({
+        prompt,
+        modelName: provider?.modelName || DEFAULT_OLLAMA_MODEL,
+        apiUrl: provider?.apiUrl || DEFAULT_OLLAMA_API_URL,
+        apiKey: provider?.apiKey,
+      });
+
+      const cleanedText = sanitiseGeneratedText(rawText);
+
+      try {
+        const errorLog = JSON.parse(cleanedText);
+        return errorLog;
+      } catch (parseError) {
+        console.error('JSON parse error (Ollama):', parseError);
+        console.error('Attempted to parse:', cleanedText);
+        throw new Error('Invalid JSON generated by Ollama');
       }
-      
-      throw new Error(`Gemini API error: ${response.status} - ${errorText.substring(0, 200)}`);
     }
 
-    const data = await response.json();
-    const generatedText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-
-    if (!generatedText) {
-      console.error('No content in response:', JSON.stringify(data, null, 2));
-      throw new Error('No content generated from Gemini');
-    }
-
-    // Clean up the response - remove markdown code blocks if present
-    let cleanedText = generatedText.trim();
-    if (cleanedText.startsWith('```json')) {
-      cleanedText = cleanedText.replace(/```json\n?/g, '').replace(/```\n?$/g, '');
-    } else if (cleanedText.startsWith('```')) {
-      cleanedText = cleanedText.replace(/```\n?/g, '');
-    }
-
-    // Parse the JSON
-    try {
-      const errorLog = JSON.parse(cleanedText);
-      return errorLog;
-    } catch (parseError) {
-      console.error('JSON parse error:', parseError);
-      console.error('Attempted to parse:', cleanedText);
-      throw new Error('Invalid JSON generated by Gemini');
-    }
+    throw new Error(`Unsupported AI provider "${providerType}".`);
   } catch (error) {
     console.error('Error in generateSyntheticError:', error);
-    
-    // Handle specific Gemini API errors
+
     if (error.message?.includes('429')) {
       throw new Error('Rate limit exceeded. Please try again later.');
     }
-    
+
     if (error.message?.includes('quota') || error.message?.includes('QUOTA')) {
       throw new Error('API quota exceeded. Please check your Gemini API quota.');
     }
-    
+
     throw error;
   }
 }
