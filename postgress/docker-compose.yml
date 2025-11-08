@@ -1,0 +1,37 @@
+services:
+  # PostgreSQL
+  postgres:
+    image: postgres:17
+    container_name: error-log-streamer-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - error-log-streamer-postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      PGPASSWORD: admin
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: error_log_streamer
+    networks:
+      - error-log-streamer-network
+  #adminer
+  adminer:
+    image: adminer:5.2.1
+    container_name: error-log-streamer-adminer
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    networks:
+      - error-log-streamer-network
+
+networks:
+  error-log-streamer-network:
+    driver: bridge
+
+volumes:
+  error-log-streamer-postgres-data:
+    driver: local
