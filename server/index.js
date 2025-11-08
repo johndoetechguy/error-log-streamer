@@ -38,28 +38,48 @@ app.use(express.json());
 // Configuration state (in-memory, can be persisted to DB later)
 let config = {
   interval: 5000, // Default 5 seconds
-  template: `You are a streaming data generator. Produce one realistic API error event in JSON format only.
+  template: `You are a streaming data generator. Produce one realistic API error event in strict JSON format only.
 
-Generate one JSON object with these fields:
-timestamp, errorCode, error, errorCategory, errorLocation, apiName, errorReason,
-awsCluster, actionToBeTaken, correlationId, orderId, serviceName, errorStackTrace.
+Formatting requirements:
+- errorCode, serviceName, errorCategory, errorLocation, and apiName must be uppercase with underscores (e.g. PAYMENT_GATEWAY_TIMEOUT_ERR).
+- orderId and correlationId must be valid UUID v4 strings.
+- errorStackTrace must be a realistic multi-line stack trace with at least 3 frames.
+- Return valid JSON with double-quoted keys and no trailing commas.
 
-Rules:
-- Output strictly valid JSON (no code blocks or explanations)
-- Use current UTC time for timestamp
-- Use uppercase for API and service names
-- Include realistic stack traces with at least 2 nested calls
-- errorCategory must be one of: API_FAILURE, VALIDATION_ERROR, SYSTEM_ERROR, NETWORK_FAILURE
-- All UUIDs must be valid v4 format
-- The stack trace must look authentic with multiple nested calls (e.g., DAO → Manager → Service)`
+Variation requirements:
+- Maintain at most {{VARIATION_LIMIT}} distinct values across errorCode, serviceName, errorCategory, errorLocation, and apiName.
+- After reaching the limit, reuse previously emitted values while still varying combinations and other fields.
+- Keep the response coherent with the generated identifiers and timestamps.
+
+Output rules:
+- Emit a single JSON object only. No explanations, comments, or code fences.`
 };
 
 const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash-preview-05-20';
 const FALLBACK_GEMINI_API_URL = 'https://generativelanguage.googleapis.com';
 const FALLBACK_OLLAMA_MODEL = 'llama3.2:3b';
 const FALLBACK_OLLAMA_API_URL = 'http://localhost:11434';
+const DEFAULT_VARIATION_LIMIT = 10;
+const MIN_VARIATION_LIMIT = 1;
+const MAX_VARIATION_LIMIT = 10;
 
 let currentProviderInfo = null;
+let currentVariationLimit = DEFAULT_VARIATION_LIMIT;
+
+function clampVariationLimit(raw) {
+  const parsed = parseInt(raw, 10);
+  if (Number.isNaN(parsed)) {
+    return DEFAULT_VARIATION_LIMIT;
+  }
+  return Math.min(MAX_VARIATION_LIMIT, Math.max(MIN_VARIATION_LIMIT, parsed));
+}
+
+function buildGenerationPrompt(baseTemplate, variationLimit) {
+  const limit = clampVariationLimit(variationLimit ?? currentVariationLimit);
+  const template = baseTemplate ?? config.template ?? '';
+  currentVariationLimit = limit;
+  return template.replaceAll('{{VARIATION_LIMIT}}', String(limit));
+}
 
 async function ensureCurrentProviderInfo() {
   if (currentProviderInfo?.type) {
@@ -71,12 +91,15 @@ async function ensureCurrentProviderInfo() {
     let providerType = aiSettings.activeProvider;
 
     if (!providerType) {
-      const appConfigValues = await getAppConfig(['ACTIVE_PROVIDER']);
+      const appConfigValues = await getAppConfig(['ACTIVE_PROVIDER', 'ERROR_VARIATION_LIMIT']);
       if (
         appConfigValues.ACTIVE_PROVIDER &&
         aiSettings.providers?.[appConfigValues.ACTIVE_PROVIDER]
       ) {
         providerType = appConfigValues.ACTIVE_PROVIDER;
+      }
+      if (appConfigValues.ERROR_VARIATION_LIMIT) {
+        currentVariationLimit = clampVariationLimit(appConfigValues.ERROR_VARIATION_LIMIT);
       }
     }
 
@@ -133,12 +156,15 @@ async function resolveActiveAIProviderConfig() {
   let providerType = aiSettings.activeProvider;
 
   if (!providerType) {
-    const appConfigValues = await getAppConfig(['ACTIVE_PROVIDER']);
+    const appConfigValues = await getAppConfig(['ACTIVE_PROVIDER', 'ERROR_VARIATION_LIMIT']);
     if (
       appConfigValues.ACTIVE_PROVIDER &&
       aiSettings.providers?.[appConfigValues.ACTIVE_PROVIDER]
     ) {
       providerType = appConfigValues.ACTIVE_PROVIDER;
+    }
+    if (appConfigValues.ERROR_VARIATION_LIMIT) {
+      currentVariationLimit = clampVariationLimit(appConfigValues.ERROR_VARIATION_LIMIT);
     }
   }
 
@@ -155,6 +181,9 @@ async function resolveActiveAIProviderConfig() {
         modelName: fallback.modelName,
       };
       await upsertAppConfig({ ACTIVE_PROVIDER: fallback.type });
+      currentVariationLimit = clampVariationLimit(
+        (await getAppConfig(['ERROR_VARIATION_LIMIT'])).ERROR_VARIATION_LIMIT
+      );
       return fallback;
     }
     throw new Error('No AI provider configured. Please configure one in Settings.');
@@ -294,8 +323,9 @@ function stopStream() {
 async function generateAndBroadcast() {
   try {
     const provider = await resolveActiveAIProviderConfig();
+    const prompt = buildGenerationPrompt(config.template, currentVariationLimit);
     const errorLog = await generateSyntheticError({
-      prompt: config.template,
+      prompt,
       provider,
     });
     
@@ -364,11 +394,24 @@ app.get('/api/config', async (req, res) => {
   try {
     const aiProvider = await getAIProviderSettings();
     const defaultApiUrl = process.env.VITE_API_URL || 'http://localhost:3000';
-    let appConfig = await getAppConfig(['VITE_API_URL']);
+    const desiredKeys = ['VITE_API_URL', 'ERROR_VARIATION_LIMIT'];
+    let appConfig = await getAppConfig(desiredKeys);
 
     if (!appConfig.VITE_API_URL) {
-      appConfig = await upsertAppConfig({ VITE_API_URL: defaultApiUrl });
+      appConfig = await upsertAppConfig({
+        VITE_API_URL: defaultApiUrl,
+        ERROR_VARIATION_LIMIT: String(DEFAULT_VARIATION_LIMIT),
+      });
+    } else if (!appConfig.ERROR_VARIATION_LIMIT) {
+      appConfig = await upsertAppConfig({ ERROR_VARIATION_LIMIT: String(DEFAULT_VARIATION_LIMIT) });
     }
+
+    currentVariationLimit = clampVariationLimit(appConfig.ERROR_VARIATION_LIMIT);
+
+    appConfig = {
+      VITE_API_URL: appConfig.VITE_API_URL ?? defaultApiUrl,
+      ERROR_VARIATION_LIMIT: String(currentVariationLimit),
+    };
 
     res.json({
       interval: config.interval,
@@ -416,10 +459,25 @@ app.post('/api/config', async (req, res) => {
     }
 
     if (appConfigPayload) {
-      persistedAppConfig = await upsertAppConfig(appConfigPayload);
+      const upsertPayload = { ...appConfigPayload };
+      if (upsertPayload.ERROR_VARIATION_LIMIT !== undefined) {
+        upsertPayload.ERROR_VARIATION_LIMIT = String(
+          clampVariationLimit(upsertPayload.ERROR_VARIATION_LIMIT)
+        );
+      }
+      persistedAppConfig = await upsertAppConfig(upsertPayload);
     } else {
-      persistedAppConfig = await getAppConfig(['VITE_API_URL']);
+      persistedAppConfig = await getAppConfig(['VITE_API_URL', 'ERROR_VARIATION_LIMIT']);
     }
+
+    currentVariationLimit = clampVariationLimit(
+      persistedAppConfig.ERROR_VARIATION_LIMIT ?? currentVariationLimit
+    );
+    const fallbackApiUrl = process.env.VITE_API_URL || 'http://localhost:3000';
+    persistedAppConfig = {
+      VITE_API_URL: persistedAppConfig.VITE_API_URL ?? fallbackApiUrl,
+      ERROR_VARIATION_LIMIT: String(currentVariationLimit),
+    };
 
     if (providerSettings?.activeProvider) {
       const active = providerSettings.activeProvider;
@@ -472,8 +530,9 @@ app.delete('/api/logs', async (req, res) => {
 app.post('/api/generate-error', async (req, res) => {
   try {
     const provider = await resolveActiveAIProviderConfig();
+    const prompt = buildGenerationPrompt(config.template, currentVariationLimit);
     const errorLog = await generateSyntheticError({
-      prompt: config.template,
+      prompt,
       provider,
     });
     

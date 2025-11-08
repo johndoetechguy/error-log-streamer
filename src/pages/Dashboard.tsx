@@ -161,7 +161,7 @@ const Dashboard = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [applyProviderFromSettings]);
 
   // Keep websocket endpoint in sync with base API URL
   useEffect(() => {

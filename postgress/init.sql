@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS app_config (
 INSERT INTO app_config (key, value, description)
 VALUES 
   ('VITE_API_URL', 'http://localhost:3000', 'Default API URL for the frontend'),
-  ('ACTIVE_PROVIDER', 'gemini', 'Current active AI provider identifier')
+  ('ACTIVE_PROVIDER', 'gemini', 'Current active AI provider identifier'),
+  ('ERROR_VARIATION_LIMIT', '10', 'Maximum distinct uppercase identifier values before reuse')
 ON CONFLICT (key)
 DO UPDATE SET
   value = EXCLUDED.value,

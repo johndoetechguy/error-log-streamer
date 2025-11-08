@@ -15,18 +15,21 @@ import {
 import { useTheme } from "next-themes";
 import { useStreamingContext } from "@/context/StreamingContext";
 
-const DEFAULT_PROMPT = `You are a streaming data generator. Produce one realistic API error event in JSON format only.
+const DEFAULT_PROMPT = `You are a streaming data generator. Produce one realistic API error event in strict JSON format only.
 
-Generate one JSON object with these fields:
-timestamp, errorCode, error, errorCategory, errorLocation, apiName, errorReason,
-awsCluster, actionToBeTaken, correlationId, orderId, serviceName, errorStackTrace.
+Formatting requirements:
+- errorCode, serviceName, errorCategory, errorLocation, and apiName must be uppercase with underscores (e.g. PAYMENT_GATEWAY_TIMEOUT_ERR).
+- orderId and correlationId must be valid UUID v4 strings.
+- errorStackTrace must be a realistic multi-line stack trace with at least 3 frames.
+- Return valid JSON with double-quoted keys and no trailing commas.
 
-Rules:
-- Output strictly valid JSON (no code blocks or explanations)
-- Use current UTC time for timestamp
-- Use uppercase for API and service names
-- Include realistic stack traces and random UUIDs
-- errorCategory must be one of: API_FAILURE, VALIDATION_ERROR, SYSTEM_ERROR, NETWORK_FAILURE`;
+Variation requirements:
+- Maintain at most {{VARIATION_LIMIT}} distinct values across errorCode, serviceName, errorCategory, errorLocation, and apiName.
+- After reaching the limit, reuse previously emitted values while still varying combinations and other fields.
+- Keep the response coherent with the generated identifiers and timestamps.
+
+Output rules:
+- Emit a single JSON object only. No explanations, comments, or code fences.`;
 
 type ProviderType = "gemini" | "ollama";
 
@@ -38,6 +41,7 @@ interface ProviderConfig {
 
 interface AppConfigState {
   VITE_API_URL: string;
+  ERROR_VARIATION_LIMIT: number;
 }
 
 const PROVIDER_TYPES: ProviderType[] = ["gemini", "ollama"];
@@ -57,7 +61,11 @@ const DEFAULT_PROVIDER_SETTINGS: Record<ProviderType, ProviderConfig> = {
 
 const DEFAULT_APP_CONFIG: AppConfigState = {
   VITE_API_URL: import.meta.env.VITE_API_URL || "http://localhost:3000",
+  ERROR_VARIATION_LIMIT: 10,
 };
+
+const VARIATION_LIMIT_MIN = 1;
+const VARIATION_LIMIT_MAX = 10;
 
 const PROVIDER_METADATA: Record<
   ProviderType,
@@ -100,6 +108,29 @@ const mergeProviderSettings = (
   }, {} as Record<ProviderType, ProviderConfig>);
 };
 
+const clampVariationLimit = (value: unknown): number => {
+  const parsed =
+    typeof value === "string" ? Number(value) : typeof value === "number" ? value : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_APP_CONFIG.ERROR_VARIATION_LIMIT;
+  }
+  const intValue = Math.trunc(parsed);
+  return Math.min(VARIATION_LIMIT_MAX, Math.max(VARIATION_LIMIT_MIN, intValue));
+};
+
+const mergeAppConfigState = (input?: Partial<Record<string, unknown>>): AppConfigState => {
+  const base = input ?? {};
+  const apiUrl =
+    typeof base.VITE_API_URL === "string" && base.VITE_API_URL.trim().length > 0
+      ? base.VITE_API_URL.trim()
+      : DEFAULT_APP_CONFIG.VITE_API_URL;
+
+  return {
+    VITE_API_URL: apiUrl,
+    ERROR_VARIATION_LIMIT: clampVariationLimit(base.ERROR_VARIATION_LIMIT),
+  };
+};
+
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 const Settings = () => {
@@ -111,7 +142,7 @@ const Settings = () => {
   const [providerSettings, setProviderSettings] = useState<Record<ProviderType, ProviderConfig>>(
     () => createDefaultProviderSettings()
   );
-  const [appConfig, setAppConfig] = useState<AppConfigState>(DEFAULT_APP_CONFIG);
+  const [appConfig, setAppConfig] = useState<AppConfigState>(() => ({ ...DEFAULT_APP_CONFIG }));
   const { setProviderInfo } = useStreamingContext();
 
   const applyProviderToContext = useCallback(
@@ -158,17 +189,15 @@ const Settings = () => {
           setInterval(serverConfig.interval || 5000);
           setTemplate(serverConfig.template || DEFAULT_PROMPT);
           if (serverConfig.appConfig) {
-            setAppConfig({
-              ...DEFAULT_APP_CONFIG,
-              ...serverConfig.appConfig,
-            });
+            const mergedAppConfig = mergeAppConfigState(serverConfig.appConfig);
+            setAppConfig(mergedAppConfig);
           }
           if (serverConfig.aiProvider) {
             const { activeProvider: active, providers } = serverConfig.aiProvider;
             if (active && PROVIDER_TYPES.includes(active)) {
               setActiveProvider(active);
             }
-            if (providers) {
+            {
               const merged = mergeProviderSettings(providers);
               setProviderSettings(merged);
               if (active && PROVIDER_TYPES.includes(active)) {
@@ -184,10 +213,8 @@ const Settings = () => {
             setInterval(settings.interval || 5000);
             setTemplate(settings.template || DEFAULT_PROMPT);
             if (settings.appConfig) {
-              setAppConfig({
-                ...DEFAULT_APP_CONFIG,
-                ...settings.appConfig,
-              });
+              const mergedAppConfig = mergeAppConfigState(settings.appConfig);
+              setAppConfig(mergedAppConfig);
             }
             if (settings.aiProvider) {
               const { activeProvider: active, providers } = settings.aiProvider;
@@ -211,10 +238,8 @@ const Settings = () => {
           setInterval(settings.interval || 5000);
           setTemplate(settings.template || DEFAULT_PROMPT);
           if (settings.appConfig) {
-            setAppConfig({
-              ...DEFAULT_APP_CONFIG,
-              ...settings.appConfig,
-            });
+            const mergedAppConfig = mergeAppConfigState(settings.appConfig);
+            setAppConfig(mergedAppConfig);
           }
           if (settings.aiProvider) {
             const { activeProvider: active, providers } = settings.aiProvider;
@@ -275,10 +300,7 @@ const Settings = () => {
 
         let nextAppConfig = appConfig;
         if (data?.appConfig) {
-          nextAppConfig = {
-            ...DEFAULT_APP_CONFIG,
-            ...data.appConfig,
-          };
+          nextAppConfig = mergeAppConfigState(data.appConfig);
           setAppConfig(nextAppConfig);
         }
 
@@ -323,7 +345,7 @@ const Settings = () => {
   const resetSettings = () => {
     setInterval(5000);
     setTemplate(DEFAULT_PROMPT);
-    setAppConfig(DEFAULT_APP_CONFIG);
+    setAppConfig({ ...DEFAULT_APP_CONFIG });
     setActiveProvider("gemini");
     const defaults = createDefaultProviderSettings();
     setProviderSettings(defaults);
@@ -411,6 +433,28 @@ const Settings = () => {
           <p className="text-sm text-muted-foreground">
             Base API URL exposed to the frontend build pipeline. Update this when pointing the dashboard to a different
             backend environment.
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="app-variation-limit">Max distinct uppercase identifiers (1-10)</Label>
+          <Input
+            id="app-variation-limit"
+            type="number"
+            inputMode="numeric"
+            min={VARIATION_LIMIT_MIN}
+            max={VARIATION_LIMIT_MAX}
+            value={appConfig.ERROR_VARIATION_LIMIT}
+            onChange={(e) =>
+              setAppConfig((prev) => ({
+                ...prev,
+                ERROR_VARIATION_LIMIT: clampVariationLimit(e.target.value),
+              }))
+            }
+          />
+          <p className="text-sm text-muted-foreground">
+            Controls how many unique values the generator may introduce for errorCode, serviceName, errorCategory,
+            errorLocation, and apiName before reusing existing ones.
           </p>
         </div>
 
