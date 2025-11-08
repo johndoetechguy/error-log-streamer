@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
@@ -13,6 +13,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useTheme } from "next-themes";
+import { useStreamingContext } from "@/context/StreamingContext";
 
 const DEFAULT_PROMPT = `You are a streaming data generator. Produce one realistic API error event in JSON format only.
 
@@ -48,7 +49,7 @@ const DEFAULT_PROVIDER_SETTINGS: Record<ProviderType, ProviderConfig> = {
     apiKey: "",
   },
   ollama: {
-    modelName: "llama3.1",
+    modelName: "llama3.2:3b",
     apiUrl: "http://localhost:11434",
     apiKey: "",
   },
@@ -111,19 +112,39 @@ const Settings = () => {
     () => createDefaultProviderSettings()
   );
   const [appConfig, setAppConfig] = useState<AppConfigState>(DEFAULT_APP_CONFIG);
+  const { setProviderInfo } = useStreamingContext();
+
+  const applyProviderToContext = useCallback(
+    (provider: ProviderType, settings: Record<ProviderType, ProviderConfig>) => {
+      const config = settings[provider];
+      setProviderInfo({
+        type: provider,
+        modelName: config?.modelName ?? null,
+      });
+    },
+    [setProviderInfo],
+  );
 
   const updateProviderField = (
     provider: ProviderType,
     field: keyof ProviderConfig,
     value: string
   ) => {
-    setProviderSettings((prev) => ({
-      ...prev,
-      [provider]: {
-        ...prev[provider],
-        [field]: value,
-      },
-    }));
+    setProviderSettings((prev) => {
+      const next = {
+        ...prev,
+        [provider]: {
+          ...prev[provider],
+          [field]: value,
+        },
+      };
+
+      if (provider === activeProvider) {
+        applyProviderToContext(provider, next);
+      }
+
+      return next;
+    });
   };
 
   // Load settings from server and localStorage
@@ -148,7 +169,11 @@ const Settings = () => {
               setActiveProvider(active);
             }
             if (providers) {
-              setProviderSettings(mergeProviderSettings(providers));
+              const merged = mergeProviderSettings(providers);
+              setProviderSettings(merged);
+              if (active && PROVIDER_TYPES.includes(active)) {
+                applyProviderToContext(active, merged);
+              }
             }
           }
         } else {
@@ -169,7 +194,11 @@ const Settings = () => {
               if (active && PROVIDER_TYPES.includes(active)) {
                 setActiveProvider(active);
               }
-              setProviderSettings(mergeProviderSettings(providers));
+              const merged = mergeProviderSettings(providers);
+              setProviderSettings(merged);
+              if (active && PROVIDER_TYPES.includes(active)) {
+                applyProviderToContext(active, merged);
+              }
             }
           }
         }
@@ -192,14 +221,18 @@ const Settings = () => {
             if (active && PROVIDER_TYPES.includes(active)) {
               setActiveProvider(active);
             }
-            setProviderSettings(mergeProviderSettings(providers));
+            const merged = mergeProviderSettings(providers);
+            setProviderSettings(merged);
+            if (active && PROVIDER_TYPES.includes(active)) {
+              applyProviderToContext(active, merged);
+            }
           }
         }
       }
     };
 
     loadSettings();
-  }, []);
+  }, [applyProviderToContext]);
 
   const saveSettings = async () => {
     setLoading(true);
@@ -259,6 +292,10 @@ const Settings = () => {
           },
         };
         localStorage.setItem("streamer-settings", JSON.stringify(settingsToPersist));
+        applyProviderToContext(
+          (nextActiveProvider as ProviderType) ?? activeProvider,
+          nextProviderSettings as Record<ProviderType, ProviderConfig>,
+        );
         toast.success("Settings saved successfully");
       } else {
         throw new Error("Failed to save settings to server");
@@ -276,6 +313,7 @@ const Settings = () => {
         },
       };
       localStorage.setItem("streamer-settings", JSON.stringify(settings));
+      applyProviderToContext(activeProvider, providerSettings);
       toast.warning("Settings saved locally (server unavailable)");
     } finally {
       setLoading(false);
@@ -287,9 +325,35 @@ const Settings = () => {
     setTemplate(DEFAULT_PROMPT);
     setAppConfig(DEFAULT_APP_CONFIG);
     setActiveProvider("gemini");
-    setProviderSettings(createDefaultProviderSettings());
+    const defaults = createDefaultProviderSettings();
+    setProviderSettings(defaults);
+    applyProviderToContext("gemini", defaults);
     localStorage.removeItem("streamer-settings");
     toast.info("Settings reset to defaults");
+  };
+
+  const purgeData = async () => {
+    if (!window.confirm("This will delete all generated error logs and analytics. Continue?")) {
+      return;
+    }
+
+    try {
+      const baseUrl = appConfig.VITE_API_URL || API_URL;
+      const response = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/logs`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload?.error || "Failed to purge data");
+      }
+
+      toast.success("All stored logs and analytics were deleted.");
+    } catch (error) {
+      console.error("Error purging data:", error);
+      const message = error instanceof Error ? error.message : "Failed to purge stored data";
+      toast.error(message);
+    }
   };
 
   return (
@@ -354,7 +418,11 @@ const Settings = () => {
           <Label>Active AI Provider</Label>
           <Select
             value={activeProvider}
-            onValueChange={(value) => setActiveProvider(value as ProviderType)}
+            onValueChange={(value) => {
+              const provider = value as ProviderType;
+              setActiveProvider(provider);
+              applyProviderToContext(provider, providerSettings);
+            }}
           >
             <SelectTrigger>
               <SelectValue placeholder="Select provider" />
@@ -468,6 +536,9 @@ const Settings = () => {
           </Button>
           <Button onClick={resetSettings} variant="outline" className="flex-1">
             Reset to Defaults
+          </Button>
+          <Button onClick={purgeData} variant="destructive">
+            Delete Stored Data
           </Button>
         </div>
       </Card>

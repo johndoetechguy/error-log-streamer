@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { StreamControls } from "@/components/StreamControls";
 import { JsonViewer } from "@/components/JsonViewer";
 import { ErrorAnalytics } from "@/components/ErrorAnalytics";
@@ -6,6 +6,7 @@ import { StatsCards } from "@/components/StatsCards";
 import { toast } from "sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useWebSocket } from "@/hooks/useWebSocket";
+import { useStreamingContext } from "@/context/StreamingContext";
 
 interface ErrorLog {
   timestamp: string;
@@ -56,11 +57,33 @@ function buildWebSocketUrl(baseUrl: string): string {
 const DEFAULT_API_URL = normalizeApiBase(RAW_ENV_API_URL);
 const DEFAULT_WS_URL = buildWebSocketUrl(DEFAULT_API_URL);
 
+const DEFAULT_MODEL_BY_PROVIDER: Record<string, string> = {
+  gemini: "gemini-2.5-flash-preview-05-20",
+  ollama: "llama3.2:3b",
+};
+
 const Dashboard = () => {
   const [logs, setLogs] = useState<ErrorLog[]>([]);
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(DEFAULT_API_URL);
   const [wsUrl, setWsUrl] = useState<string>(DEFAULT_WS_URL);
   const { isConnected, isStreaming, lastMessage } = useWebSocket(wsUrl);
+  const { setProviderInfo, setIsStreaming: setContextStreaming } = useStreamingContext();
+
+  const applyProviderFromSettings = useCallback(
+    (active: string | null, providers?: Record<string, { modelName?: string }>) => {
+      if (!active) {
+        return;
+      }
+      const modelName =
+        providers?.[active]?.modelName ?? DEFAULT_MODEL_BY_PROVIDER[active] ?? null;
+
+      setProviderInfo({
+        type: active,
+        modelName: modelName ?? null,
+      });
+    },
+    [setProviderInfo],
+  );
 
   // Handle WebSocket messages
   useEffect(() => {
@@ -69,9 +92,17 @@ const Dashboard = () => {
         setLogs((prev) => [lastMessage.data, ...prev]);
       } else if (lastMessage.type === "error") {
         toast.error(lastMessage.message || "Error occurred");
+      } else if (lastMessage.type === "status") {
+        setContextStreaming(lastMessage.isStreaming ?? false);
+        if (lastMessage.provider) {
+          setProviderInfo({
+            type: lastMessage.provider.type ?? null,
+            modelName: lastMessage.provider.modelName ?? null,
+          });
+        }
       }
     }
-  }, [lastMessage]);
+  }, [lastMessage, setContextStreaming, setProviderInfo]);
 
   // Show connection status (only on initial connect/disconnect)
   const [hasShownConnectionStatus, setHasShownConnectionStatus] = useState(false);
@@ -95,11 +126,12 @@ const Dashboard = () => {
         if (typeof storedApi === "string" && storedApi.trim().length > 0) {
           setApiBaseUrl(normalizeApiBase(storedApi));
         }
+        applyProviderFromSettings(parsed?.aiProvider?.activeProvider ?? null, parsed?.aiProvider?.providers);
       }
     } catch (error) {
       console.error("Error reading stored settings:", error);
     }
-  }, []);
+  }, [applyProviderFromSettings]);
 
   // Fetch configuration from backend to pick up server-side base URL
   useEffect(() => {
@@ -115,6 +147,9 @@ const Dashboard = () => {
         const configuredApiUrl = data?.appConfig?.VITE_API_URL;
         if (!cancelled && typeof configuredApiUrl === "string" && configuredApiUrl.trim().length > 0) {
           setApiBaseUrl(normalizeApiBase(configuredApiUrl));
+        }
+        if (!cancelled) {
+          applyProviderFromSettings(data?.aiProvider?.activeProvider ?? null, data?.aiProvider?.providers);
         }
       } catch (error) {
         console.error("Error loading app configuration:", error);
@@ -212,6 +247,10 @@ const Dashboard = () => {
     setLogs([]);
     toast.info("Logs cleared");
   };
+
+  useEffect(() => {
+    setContextStreaming(isStreaming);
+  }, [isStreaming, setContextStreaming]);
 
   return (
     <div className="space-y-6">

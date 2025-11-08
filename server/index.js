@@ -15,6 +15,7 @@ import {
   saveAIProviderSettings,
   getAppConfig,
   upsertAppConfig,
+  purgeAllData,
 } from './db/postgres.js';
 
 dotenv.config();
@@ -55,21 +56,106 @@ Rules:
 
 const FALLBACK_GEMINI_MODEL = 'gemini-2.5-flash-preview-05-20';
 const FALLBACK_GEMINI_API_URL = 'https://generativelanguage.googleapis.com';
-const FALLBACK_OLLAMA_MODEL = 'llama3.1';
+const FALLBACK_OLLAMA_MODEL = 'llama3.2:3b';
 const FALLBACK_OLLAMA_API_URL = 'http://localhost:11434';
+
+let currentProviderInfo = null;
+
+async function ensureCurrentProviderInfo() {
+  if (currentProviderInfo?.type) {
+    return currentProviderInfo;
+  }
+
+  try {
+    const aiSettings = await getAIProviderSettings();
+    let providerType = aiSettings.activeProvider;
+
+    if (!providerType) {
+      const appConfigValues = await getAppConfig(['ACTIVE_PROVIDER']);
+      if (
+        appConfigValues.ACTIVE_PROVIDER &&
+        aiSettings.providers?.[appConfigValues.ACTIVE_PROVIDER]
+      ) {
+        providerType = appConfigValues.ACTIVE_PROVIDER;
+      }
+    }
+
+    if (!providerType) {
+      if (process.env.GEMINI_API_KEY) {
+        currentProviderInfo = {
+          type: 'gemini',
+          modelName: FALLBACK_GEMINI_MODEL,
+        };
+        return currentProviderInfo;
+      }
+      return null;
+    }
+
+    const providerConfig = aiSettings.providers?.[providerType] || {};
+
+    currentProviderInfo = {
+      type: providerType,
+      modelName:
+        providerConfig.modelName ||
+        (providerType === 'gemini' ? FALLBACK_GEMINI_MODEL : FALLBACK_OLLAMA_MODEL),
+    };
+    return currentProviderInfo;
+  } catch (error) {
+    console.error('Failed to resolve provider snapshot:', error);
+    return currentProviderInfo;
+  }
+}
+
+function broadcastStatus(overrides = {}) {
+  ensureCurrentProviderInfo()
+    .then((provider) => {
+      broadcast({
+        type: 'status',
+        isStreaming,
+        interval: overrides.interval ?? config.interval,
+        provider,
+        ...overrides,
+      });
+    })
+    .catch((error) => {
+      console.error('Failed to broadcast status:', error);
+      broadcast({
+        type: 'status',
+        isStreaming,
+        interval: overrides.interval ?? config.interval,
+        ...overrides,
+      });
+    });
+}
 
 async function resolveActiveAIProviderConfig() {
   const aiSettings = await getAIProviderSettings();
-  const providerType = aiSettings.activeProvider;
+  let providerType = aiSettings.activeProvider;
+
+  if (!providerType) {
+    const appConfigValues = await getAppConfig(['ACTIVE_PROVIDER']);
+    if (
+      appConfigValues.ACTIVE_PROVIDER &&
+      aiSettings.providers?.[appConfigValues.ACTIVE_PROVIDER]
+    ) {
+      providerType = appConfigValues.ACTIVE_PROVIDER;
+    }
+  }
 
   if (!providerType) {
     if (process.env.GEMINI_API_KEY) {
-      return {
+      const fallback = {
         type: 'gemini',
         modelName: FALLBACK_GEMINI_MODEL,
         apiUrl: FALLBACK_GEMINI_API_URL,
         apiKey: process.env.GEMINI_API_KEY,
       };
+      currentProviderInfo = {
+        type: fallback.type,
+        modelName: fallback.modelName,
+      };
+      await upsertAppConfig({ ACTIVE_PROVIDER: fallback.type });
+      return fallback;
     }
     throw new Error('No AI provider configured. Please configure one in Settings.');
   }
@@ -116,6 +202,12 @@ async function resolveActiveAIProviderConfig() {
     throw new Error(`API URL is required for provider "${providerType}".`);
   }
 
+  currentProviderInfo = {
+    type: resolved.type,
+    modelName: resolved.modelName,
+  };
+  await upsertAppConfig({ ACTIVE_PROVIDER: providerType });
+
   return resolved;
 }
 
@@ -129,6 +221,17 @@ wss.on('connection', (ws) => {
   console.log('WebSocket client connected');
   connectedClients.add(ws);
 
+  ensureCurrentProviderInfo().then((provider) => {
+    ws.send(
+      JSON.stringify({
+        type: 'status',
+        isStreaming,
+        interval: config.interval,
+        provider,
+      })
+    );
+  });
+
   ws.on('close', () => {
     console.log('WebSocket client disconnected');
     connectedClients.delete(ws);
@@ -138,13 +241,6 @@ wss.on('connection', (ws) => {
     console.error('WebSocket error:', error);
     connectedClients.delete(ws);
   });
-
-  // Send current status on connection
-  ws.send(JSON.stringify({
-    type: 'status',
-    isStreaming,
-    interval: config.interval
-  }));
 });
 
 // Broadcast to all connected WebSocket clients
@@ -174,7 +270,7 @@ function startStream(interval) {
     await generateAndBroadcast();
   }, streamIntervalMs);
 
-  broadcast({ type: 'status', isStreaming: true, interval: streamIntervalMs });
+  broadcastStatus({ interval: streamIntervalMs });
   return { success: true, message: 'Stream started', interval: streamIntervalMs };
 }
 
@@ -190,7 +286,7 @@ function stopStream() {
     streamInterval = null;
   }
 
-  broadcast({ type: 'status', isStreaming: false });
+  broadcastStatus();
   return { success: true, message: 'Stream stopped' };
 }
 
@@ -215,15 +311,20 @@ async function generateAndBroadcast() {
       broadcast({
         type: 'error-log',
         data: errorLog,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        provider: currentProviderInfo,
       });
     }
   } catch (error) {
     console.error('Error generating log:', error);
-    broadcast({
+    const payload = {
       type: 'error',
-      message: error.message || 'Failed to generate error log'
-    });
+      message: error.message || 'Failed to generate error log',
+    };
+    if (currentProviderInfo) {
+      payload.provider = currentProviderInfo;
+    }
+    broadcast(payload);
   }
 }
 
@@ -320,6 +421,21 @@ app.post('/api/config', async (req, res) => {
       persistedAppConfig = await getAppConfig(['VITE_API_URL']);
     }
 
+    if (providerSettings?.activeProvider) {
+      const active = providerSettings.activeProvider;
+      const modelName =
+        providerSettings.providers?.[active]?.modelName ||
+        (active === 'gemini' ? FALLBACK_GEMINI_MODEL : FALLBACK_OLLAMA_MODEL);
+      currentProviderInfo = {
+        type: active,
+        modelName,
+      };
+    } else {
+      await ensureCurrentProviderInfo();
+    }
+
+    broadcastStatus();
+
     res.json({
       success: true,
       config: {
@@ -334,6 +450,20 @@ app.post('/api/config', async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to update configuration'
+    });
+  }
+});
+
+// DELETE /api/logs (purge data)
+app.delete('/api/logs', async (req, res) => {
+  try {
+    await purgeAllData();
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error purging logs:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to purge data'
     });
   }
 });

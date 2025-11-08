@@ -18,7 +18,7 @@ Rules:
 
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-preview-05-20';
 const DEFAULT_GEMINI_API_URL = 'https://generativelanguage.googleapis.com';
-const DEFAULT_OLLAMA_MODEL = 'llama3.1';
+const DEFAULT_OLLAMA_MODEL = 'llama3.2:3b';
 const DEFAULT_OLLAMA_API_URL = 'http://localhost:11434';
 
 function normaliseBaseUrl(url, fallback = DEFAULT_GEMINI_API_URL) {

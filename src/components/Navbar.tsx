@@ -2,10 +2,16 @@ import { Activity, Menu, Moon, Sun } from "lucide-react";
 import { Button } from "./ui/button";
 import { useTheme } from "next-themes";
 import { SidebarTrigger, useSidebar } from "./ui/sidebar";
+import { useStreamingContext } from "@/context/StreamingContext";
 
 export const Navbar = () => {
   const { theme, setTheme } = useTheme();
   const { toggleSidebar } = useSidebar();
+  const { providerInfo, isStreaming } = useStreamingContext();
+
+  const providerLabel =
+    providerInfo?.modelName ??
+    (providerInfo?.type ? providerInfo.type.toUpperCase() : "Provider not configured");
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
@@ -22,8 +28,10 @@ export const Navbar = () => {
         
         <div className="ml-auto flex items-center gap-4">
           <div className="flex items-center gap-2 rounded-full bg-muted px-3 py-1 text-sm">
-            <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
-            <span className="text-muted-foreground">Gemini 2.5 Flash</span>
+            <div
+              className={`h-2 w-2 rounded-full ${isStreaming ? "bg-success animate-pulse" : "bg-muted-foreground"}`}
+            />
+            <span className="text-muted-foreground">{providerLabel}</span>
           </div>
           
           <Button

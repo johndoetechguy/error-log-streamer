@@ -189,6 +189,22 @@ export async function upsertAppConfig(entries) {
   }
 }
 
+export async function purgeAllData() {
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+    await client.query('TRUNCATE TABLE error_logs RESTART IDENTITY CASCADE');
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Failed to purge data:', error);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 // Retrieve AI provider settings
 export async function getAIProviderSettings() {
   try {
@@ -268,6 +284,7 @@ export async function saveAIProviderSettings({ activeProvider, providers }) {
     }
 
     await client.query('COMMIT');
+    await upsertAppConfig({ ACTIVE_PROVIDER: activeProvider });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Failed to save AI provider settings:', error);

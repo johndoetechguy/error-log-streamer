@@ -9,6 +9,10 @@ interface WebSocketMessage {
   interval?: number;
   message?: string;
   timestamp?: string;
+  provider?: {
+    type?: string | null;
+    modelName?: string | null;
+  };
 }
 
 export function useWebSocket(url: string) {

@@ -38,6 +38,40 @@ CREATE TABLE IF NOT EXISTS ai_provider_settings (
 -- Ensure only one provider can be active at a time
 CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_provider_active ON ai_provider_settings ((is_active)) WHERE is_active = TRUE;
 
+-- Reset existing provider state to avoid unique constraint conflicts
+UPDATE ai_provider_settings
+SET is_active = FALSE,
+    updated_at = NOW();
+
+-- Seed default AI provider configurations
+INSERT INTO ai_provider_settings (provider_type, model_name, api_url, api_key, is_active)
+VALUES 
+  ('gemini', 'gemini-2.5-flash-preview-05-20', 'https://generativelanguage.googleapis.com', NULL, TRUE)
+ON CONFLICT (provider_type)
+DO UPDATE SET
+  model_name = EXCLUDED.model_name,
+  api_url = EXCLUDED.api_url,
+  api_key = EXCLUDED.api_key,
+  is_active = EXCLUDED.is_active,
+  updated_at = NOW();
+
+INSERT INTO ai_provider_settings (provider_type, model_name, api_url, api_key, is_active)
+VALUES 
+  ('ollama', 'llama3.2:3b', 'http://localhost:11434', NULL, FALSE)
+ON CONFLICT (provider_type)
+DO UPDATE SET
+  model_name = EXCLUDED.model_name,
+  api_url = EXCLUDED.api_url,
+  api_key = EXCLUDED.api_key,
+  is_active = EXCLUDED.is_active,
+  updated_at = NOW();
+
+-- Ensure only Gemini is active by default
+UPDATE ai_provider_settings
+SET is_active = CASE WHEN provider_type = 'gemini' THEN TRUE ELSE FALSE END,
+    updated_at = NOW()
+WHERE provider_type IN ('gemini', 'ollama');
+
 -- Application configuration key/value store
 CREATE TABLE IF NOT EXISTS app_config (
   id SERIAL PRIMARY KEY,
@@ -47,6 +81,16 @@ CREATE TABLE IF NOT EXISTS app_config (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+INSERT INTO app_config (key, value, description)
+VALUES 
+  ('VITE_API_URL', 'http://localhost:3000', 'Default API URL for the frontend'),
+  ('ACTIVE_PROVIDER', 'gemini', 'Current active AI provider identifier')
+ON CONFLICT (key)
+DO UPDATE SET
+  value = EXCLUDED.value,
+  description = EXCLUDED.description,
+  updated_at = NOW();
 
 -- Create a view for analytics
 CREATE OR REPLACE VIEW error_logs_analytics AS
